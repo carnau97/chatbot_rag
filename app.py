@@ -21,15 +21,9 @@ def clear_chat_history():
 
 
 def obtener_doc_sources(respuesta):
-
     lista_docs = respuesta['source_documents']
     documentos = ["Página: " + str(elemento.metadata['page']) + " - Contenido: " + elemento.page_content for elemento in lista_docs]
-
     return documentos
-    
-if "messages" not in st.session_state:
-    st.session_state["messages"]=[{'role': 'assistant', 'content': "¡Hola! soy el asistente virtual de IMF, ¿en qué te puedo ayudar?"}]
-    st.session_state["fuentes"]=[]
 
 @st.cache_resource
 def init_memory():
@@ -39,6 +33,28 @@ def init_memory():
     return memory
 
 memory = init_memory()
+
+@st.cache_resource
+def carga_vector_store():
+    # Cargamos el modelo de embedding
+    huggingface_embeddings = HuggingFaceBgeEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",  
+        model_kwargs={'device':'cpu'}, 
+        encode_kwargs={'normalize_embeddings': True})
+    
+    # Cargamos el vector store
+    vectorstore = PineconeVectorStore(
+        index_name=os.environ["INDEX_CHATBOT"],
+        pinecone_api_key=os.environ["PINECONE_API_KEY"],
+        embedding=huggingface_embeddings)
+    
+    return vectorstore
+
+    
+if "messages" not in st.session_state:
+    st.session_state["messages"]=[{'role': 'assistant', 'content': "¡Hola! soy el asistente virtual de IMF, ¿en qué te puedo ayudar?"}]
+    st.session_state["fuentes"]=[]
+
 
 with st.sidebar:
 
@@ -60,35 +76,21 @@ with st.sidebar:
     value=0.5)
     
 
-# Cargamos el modelo de embedding
-huggingface_embeddings = HuggingFaceBgeEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",  
-    model_kwargs={'device':'cpu'}, 
-    encode_kwargs={'normalize_embeddings': True}
-)
+vectorstore = carga_vector_store()
 
-# Cargamos el vector store
-vectorstore = PineconeVectorStore(
-    index_name=os.environ["INDEX_CHATBOT"],
-    pinecone_api_key=os.environ["PINECONE_API_KEY"],
-    embedding=huggingface_embeddings,
-)
-
-# Cargamos el llm
-
-llm = HuggingFaceEndpoint(    
-    huggingfacehub_api_token = HUGGINGFACEHUB_API_TOKEN,
-    repo_id="mistralai/Mistral-7B-Instruct-v0.2", #"meta-llama/Llama-3.2-1B", #"meta-llama/Llama-3.2-3B-Instruct"
-    temperature = 0.5, # a mayor temperatura, mayor creatividad y menos conservador
-    model_kwargs={"max_length":2048})
-                  #"max_new_tokens": 500})
-
-
-# Crear el retriever a partir del VectorStore
+# Crear el retriever a partir del VectorStore y del numero de documentos
 retriever = vectorstore.as_retriever(
     search_type="similarity", 
     search_kwargs={"k": numerodocumentos} # Consultas basadas en los 3 mejores resultados
     )
+
+# Cargar el llm con la temperatura seleccionada
+llm = HuggingFaceEndpoint(    
+    huggingfacehub_api_token = HUGGINGFACEHUB_API_TOKEN,
+    repo_id="mistralai/Mistral-7B-Instruct-v0.2", #"meta-llama/Llama-3.2-1B", #"meta-llama/Llama-3.2-3B-Instruct"
+    temperature = temperature, # a mayor temperatura, mayor creatividad y menos conservador
+    model_kwargs={"max_length":2048})
+                  #"max_new_tokens": 500})
 
 
 for msg in st.session_state["messages"]:
@@ -100,6 +102,11 @@ for msg in st.session_state["messages"]:
 user_question = st.chat_input()
 
 if user_question:
+
+    st.session_state["messages"].append({'role': 'user', 'content': user_question}) # añadimos la pregunta al session state 
+    st.chat_message("user", avatar = "👩‍💻").markdown(user_question) # la escribimos
+
+    # Generamos el prompt con la pregunta realizada, el contexto y la memoria
 
     prompt_template = """Eres un comercial especializado de una escuela de negocios que asesora a futuros alumnos sobre másters.
     Contesta la pregunta basandote en el contexto (delimitado por <ctx> </ctx>) y en el histórico del chat (delimitado por <hs></hs>) de abajo.
@@ -121,10 +128,7 @@ if user_question:
     """
 
     PROMPT = PromptTemplate(
-    template=prompt_template, input_variables=["context", "question",  "chat_history"])
-
-    st.session_state["messages"].append({'role': 'user', 'content': user_question}) # añadimos la pregunta al session state 
-    st.chat_message("user", avatar = "👩‍💻").markdown(user_question) # la escribimos
+    template=prompt_template, input_variables=["context","chat_history", "question"])
 
     retrievalQA = RetrievalQA.from_chain_type(
         llm=llm,
@@ -134,8 +138,10 @@ if user_question:
         chain_type_kwargs={"prompt": PROMPT,
                            "memory": memory})
     
-    respuesta = retrievalQA.invoke({"query": user_question})
+    respuesta = retrievalQA.invoke({"query": user_question}) # generamos respuesta
 
+    # la añadimos al session state y la escribimos
+    
     st.session_state["messages"].append({'role': 'assistant', 'content': respuesta['result']}) # guardamos la respuesta en el session state
     st.chat_message("assistant", avatar = "👩‍💻").write(str(respuesta['result'])) # la escribimos
 
